@@ -1,43 +1,73 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import current_timestamp
-import config  # Importing configuration file
+from pyspark.sql.functions import sum as _sum
 
-# Initialize SparkSession
+# Step 1: Initialize SparkSession with Optimized Configurations
 spark = SparkSession.builder \
-    .appName("CSV to BigQuery - Config-based") \
-    .config("spark.jars", r"C:\Users\O.Danielz\Documents\su-de-assessment\spark-bigquery-with-dependencies_2.13-0.41.0.jar") \
+    .appName("LoadCSVAndProcess") \
+    .config("spark.executor.memory", "4g") \
+    .config("spark.driver.memory", "4g") \
+    .config("spark.executor.cores", "2") \
+    .config("spark.sql.shuffle.partitions", "200") \
+    .config("spark.sql.autoBroadcastJoinThreshold", "-1") \
+    .config("spark.jars", r"/Users/samsonakporotu/SparkingFlow/postgresql-42.7.4.jar") \
     .getOrCreate()
 
-# Access BigQuery configuration from config.py
-project_id = config.BIGQUERY_PROJECT_ID
-dataset_name = config.BIGQUERY_DATASET_NAME
-temporary_gcs_bucket = config.TEMP_GCS_BUCKET
-csv_to_table_mapping = config.CSV_TO_TABLE_MAPPING
 
-# Process each CSV file and write it to its respective BigQuery table
-for csv_path, table_name in csv_to_table_mapping.items():
-    try:
-        # Read the CSV file
-        df = spark.read.option("header", True).csv(csv_path)
-        
-        # Add a modified_date column
-        df_with_date = df.withColumn("modified_date", current_timestamp())
-        
-        # Define the full BigQuery table path
-        bigquery_table = f"{project_id}:{dataset_name}.{table_name}"
-        
-        # Write the DataFrame to BigQuery
-        df_with_date.write.format("bigquery") \
-            .option("table", bigquery_table) \
-            .option("temporaryGcsBucket", temporary_gcs_bucket) \
-            .mode("overwrite") \
-            .save()
-        
-        print(f"Successfully wrote {csv_path} to {bigquery_table}")
-    
-    except Exception as e:
-        print(f"Failed to process {csv_path}. Error: {str(e)}")
+# Step 2: Load the CSV File
+csv_file_path = r"/Users/samsonakporotu/SparkingFlow/custom_1988_2020.csv"  # Replace with the actual path to your CSV file
+raw_df = spark.read.csv(csv_file_path, header=False, inferSchema=True, sep=",")  # Ensure the delimiter is correct
 
-# Stop the Spark session
+# Limit the data to the first 50 million rows
+raw_df = raw_df.limit(30000000)
+
+# Cache the raw data if reused multiple times
+raw_df.cache()
+
+# Step 3: Rename Columns
+column_names = [
+    "year_month", 
+    "exp_imp_flag", 
+    "country", 
+    "customs", 
+    "hs_code", 
+    "q1", 
+    "quantity",  # Rename q2 to quantity
+    "value"
+]
+df = raw_df.toDF(*column_names)
+
+# Step 4: Write Data to PostgreSQL
+db_url = "jdbc:postgresql://localhost:5433/postgres"  # Replace with your PostgreSQL details
+db_properties = {
+    "user": "postgres",  # Replace with your PostgreSQL username
+    "password": "samzy",  # Replace with your PostgreSQL password
+    "driver": "org.postgresql.Driver"
+}
+table_name = "sr_de_assessment.japan_customs_data"
+
+# Write with repartitioning to optimize write performance
+df.repartition(10).write \
+    .jdbc(url=db_url, table=table_name, mode="overwrite", properties=db_properties)
+
+# Step 5: Perform Aggregation
+# Reduce shuffle data size by using repartition
+df = df.repartition(100, "hs_code")  # Partition based on hs_code to balance processing
+
+aggregated_df = df.drop("q1").groupBy(
+    "exp_imp_flag", "country", "customs"
+).agg(
+    _sum("quantity").alias("total_quantity"),
+    _sum("value").alias("total_value")
+)
+
+# Cache the aggregated data to reuse it efficiently
+aggregated_df.cache()
+
+# Step 6: Write Aggregated Data to PostgreSQL
+aggregated_table_name = "sr_de_assessment.aggregated_data"
+
+aggregated_df.write \
+    .jdbc(url=db_url, table=aggregated_table_name, mode="overwrite", properties=db_properties)
+
+# Step 9: Stop the Spark Session
 spark.stop()
-s

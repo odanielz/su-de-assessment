@@ -1,0 +1,11 @@
+__pycache__
+.venv
+archive
+dags
+jobs
+logs
+target
+airflow.env
+config.py
+custom_1988_2020.csv
+postgresql-42.7.4.jar
